@@ -64,6 +64,11 @@ By default the answer is read via ChatGPT's built-in **Ctrl+Shift+;**
 (copy last code block) shortcut; `--capture page` falls back to a
 select-all copy of the whole page.
 
+Keep your hands off the mouse/keyboard while this GUI script runs — it
+drives your real desktop. Move the mouse to a screen corner to trigger
+PyAutoGUI's failsafe abort if something goes wrong. (The CDP scripts below
+don't have this restriction.)
+
 ## Alternative: DOM automation via CDP (recommended)
 
 `homework_automation_cdp.py` does the same job without touching the keyboard,
@@ -87,6 +92,46 @@ far more reliable and lets you keep using your computer while it runs.
 It detects the end of the answer by watching ChatGPT's Stop button disappear,
 then reads the reply's code block straight from the page.
 
-Keep your hands off the mouse/keyboard while it runs — it drives your real
-desktop. Move the mouse to a screen corner to trigger PyAutoGUI's failsafe
-abort if something goes wrong.
+## Running several workers simultaneously (background)
+
+Only the CDP script can parallelize — the GUI script drives the one real
+keyboard/mouse, so two copies would fight over it. `run_parallel.py` splits
+the problems across N detached background workers (they keep running after
+the terminal closes); each worker opens its own ChatGPT tab and skips
+problems that already have a solution:
+
+```bash
+# 3 workers as 3 tabs in ONE logged-in browser (port 9222)
+python run_parallel.py --workers 3
+
+# one worker per logged-in browser, each browser on its own debug port
+python run_parallel.py --ports 9222 9223 9224
+```
+
+For the multi-browser layout, start each browser with its own port AND its
+own profile dir, and log in to ChatGPT in each:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-debug-1
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9223 --user-data-dir=C:\chrome-debug-2
+```
+
+Progress: `tail -f logs/worker-1.log` (PowerShell:
+`Get-Content logs\worker-1.log -Wait`). Stop a worker: `kill <pid>`
+(PowerShell: `Stop-Process -Id <pid>`); the PIDs are printed at launch.
+
+Details worth knowing:
+
+- With no flags, `run_parallel.py` starts 2 workers on port 9222.
+- Workers shard the problem list (`--shard K/N`), so they never duplicate
+  work. A reply that isn't valid Python is kept as
+  `solutions/hwNN.failed.txt` instead of `hwNN.py`, and `--skip-existing`
+  only skips solutions that parse — so re-running the launcher retries
+  failed/garbage answers and resumes where the run left off.
+- The launcher checks each worker shortly after start and tells you if one
+  died (bad port, browser not logged in) instead of pretending success; it
+  also refuses to start while a previous run's workers are still alive, so
+  two runs can't race on the same files.
+- Several tabs in one browser share one ChatGPT account, and free accounts
+  rate-limit concurrent messages — if answers start failing, use fewer tabs
+  per account or spread workers across differently-logged-in browsers.

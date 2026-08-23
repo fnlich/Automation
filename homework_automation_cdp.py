@@ -23,6 +23,7 @@ then open https://chatgpt.com and log in. Run:
 
 import argparse
 import ast
+import re
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,23 @@ COMPOSER = "#prompt-textarea"
 SEND_BUTTON = '[data-testid="send-button"]'
 STOP_BUTTON = '[data-testid="stop-button"]'
 ASSISTANT_MSG = '[data-message-author-role="assistant"]'
+
+
+def is_solved(path: Path) -> bool:
+    """A problem counts as solved only if its .py exists AND parses as
+    Python — so --skip-existing retries garbage (prose, refusals,
+    truncated replies) instead of locking it in forever."""
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not source.strip():
+        return False
+    try:
+        ast.parse(source)
+        return True
+    except SyntaxError:
+        return False
 
 
 def find_chatgpt_page(browser):
@@ -137,6 +155,24 @@ def main() -> None:
         "resolve to IPv6 ::1 while Chrome listens on IPv4 only)",
     )
     parser.add_argument(
+        "--shard",
+        help="Work on a subset of the problems, for running several workers "
+        "in parallel: K/N means this is worker K of N and takes every "
+        "N-th problem starting at the K-th (e.g. 1/3, 2/3, 3/3)",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip problems that already have a non-empty solutions/<name>.py",
+    )
+    parser.add_argument(
+        "--new-tab",
+        action="store_true",
+        help="Open an own ChatGPT tab in the attached browser instead of "
+        "taking over an existing one (required when several workers share "
+        "one browser; the tab reuses the browser's login)",
+    )
+    parser.add_argument(
         "--same-chat",
         action="store_true",
         help="Keep all problems in one conversation instead of starting "
@@ -153,6 +189,15 @@ def main() -> None:
         problems = [f for f in problems if args.problem in f.name]
     if not problems:
         sys.exit(f"No problem files found in {PROBLEMS_DIR}")
+    if args.shard:
+        m = re.fullmatch(r"(\d+)/(\d+)", args.shard)
+        if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+            sys.exit(f"Bad --shard {args.shard!r}; expected K/N with 1 <= K <= N")
+        k, n = int(m.group(1)), int(m.group(2))
+        problems = problems[k - 1 :: n]
+        if not problems:
+            print(f"shard {args.shard}: no problems assigned, nothing to do")
+            return
 
     SOLUTIONS_DIR.mkdir(exist_ok=True)
 
@@ -173,33 +218,66 @@ def main() -> None:
                 "     in that browser — you should see JSON.\n"
                 "  4. Open https://chatgpt.com in it and log in."
             )
-        page = find_chatgpt_page(browser)
-        if page is None:
-            sys.exit("No ChatGPT tab found. Open https://chatgpt.com and log in first.")
-        print(f"Attached to ChatGPT tab: {page.url}")
-
-        for i, path in enumerate(problems, 1):
-            name = path.stem
-            print(f"[{i}/{len(problems)}] {path.name}")
-
-            if not args.same_chat:
-                new_chat(page)
-                print("  started a new chat")
-
-            prompt = PROMPT_TEMPLATE.format(problem=path.read_text(encoding="utf-8"))
-            solution = ask(page, prompt, args.timeout, args.poll)
-            if solution is None:
-                print(f"  WARNING: no answer within {args.timeout:.0f}s, skipping")
-                continue
-
-            out = SOLUTIONS_DIR / f"{name}.py"
-            out.write_text(solution.rstrip("\n") + "\n", encoding="utf-8")
+        own_tab = None
+        if args.new_tab:
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            own_tab = context.new_page()
+            page = own_tab
             try:
-                ast.parse(solution)
+                page.goto("https://chatgpt.com/", wait_until="domcontentloaded")
+                page.wait_for_selector(COMPOSER, timeout=60_000)
+            except Exception:
+                own_tab.close()
+                sys.exit(
+                    "Opened a tab but the ChatGPT composer never appeared. "
+                    "Make sure this browser profile is logged in to "
+                    "https://chatgpt.com (open it manually once)."
+                )
+            print("Opened an own ChatGPT tab")
+        else:
+            page = find_chatgpt_page(browser)
+            if page is None:
+                sys.exit("No ChatGPT tab found. Open https://chatgpt.com and log in first.")
+            print(f"Attached to ChatGPT tab: {page.url}")
+
+        try:
+            for i, path in enumerate(problems, 1):
+                name = path.stem
+                print(f"[{i}/{len(problems)}] {path.name}")
+
+                out = SOLUTIONS_DIR / f"{name}.py"
+                if args.skip_existing and is_solved(out):
+                    print("  already solved, skipping")
+                    continue
+
+                if not args.same_chat:
+                    new_chat(page)
+                    print("  started a new chat")
+
+                prompt = PROMPT_TEMPLATE.format(problem=path.read_text(encoding="utf-8"))
+                solution = ask(page, prompt, args.timeout, args.poll)
+                if solution is None:
+                    print(f"  WARNING: no answer within {args.timeout:.0f}s, skipping")
+                    continue
+
+                body = solution.rstrip("\n") + "\n"
+                try:
+                    ast.parse(body)
+                except SyntaxError as e:
+                    # Don't create the .py: a bad reply (prose, refusal,
+                    # truncation) must not count as solved — the next run
+                    # with --skip-existing will retry this problem.
+                    failed = SOLUTIONS_DIR / f"{name}.failed.txt"
+                    failed.write_text(body, encoding="utf-8")
+                    print(f"  WARNING: reply is not valid Python ({e.msg}, "
+                          f"line {e.lineno}); kept in {failed}, will retry "
+                          "on the next run")
+                    continue
+                out.write_text(body, encoding="utf-8")
                 print(f"  saved {out} (valid Python)")
-            except SyntaxError as e:
-                print(f"  saved {out} — WARNING: not valid Python ({e.msg}, "
-                      f"line {e.lineno}); check it manually")
+        finally:
+            if own_tab is not None:
+                own_tab.close()  # don't leave orphan tabs in the browser
 
     print("Done.")
 
