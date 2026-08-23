@@ -88,6 +88,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--problem", help="Only files whose name contains this string")
     parser.add_argument("--port", type=int, default=9222, help="CDP port (default: 9222)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="CDP host (default: 127.0.0.1 — not 'localhost', which can "
+        "resolve to IPv6 ::1 while Chrome listens on IPv4 only)",
+    )
     parser.add_argument("--timeout", type=float, default=180.0,
                         help="Max seconds to wait per answer (default: 180)")
     parser.add_argument("--poll", type=float, default=2.0,
@@ -103,12 +109,21 @@ def main() -> None:
     SOLUTIONS_DIR.mkdir(exist_ok=True)
 
     with sync_playwright() as p:
+        endpoint = f"http://{args.host}:{args.port}"
         try:
-            browser = p.chromium.connect_over_cdp(f"http://localhost:{args.port}")
+            browser = p.chromium.connect_over_cdp(endpoint)
         except Exception as e:
             sys.exit(
-                f"Could not attach to the browser on port {args.port}: {e}\n"
-                "Start Chrome with: chrome --remote-debugging-port=9222"
+                f"Could not attach to the browser at {endpoint}: {e}\n\n"
+                "Checklist:\n"
+                "  1. Close ALL Chrome windows first (check the system tray too) —\n"
+                "     if any Chrome process is still running, the flag is ignored.\n"
+                "  2. Start Chrome with BOTH flags (Windows PowerShell):\n"
+                '     & "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
+                "--remote-debugging-port=9222 --user-data-dir=C:\\chrome-debug\n"
+                "  3. Verify it's listening: open http://127.0.0.1:9222/json/version\n"
+                "     in that browser — you should see JSON.\n"
+                "  4. Open https://chatgpt.com in it and log in."
             )
         page = find_chatgpt_page(browser)
         if page is None:
