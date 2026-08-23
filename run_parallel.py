@@ -2,18 +2,20 @@
 """Run several homework_automation_cdp.py workers simultaneously in the background.
 
 Each worker is a detached process that keeps running after this launcher
-exits (and after you close the terminal). The problem list is split across
-workers with --shard, so no two workers ever touch the same problem, and
-every worker opens its OWN ChatGPT tab (--new-tab) so they don't fight
-over one tab. Output goes to logs/worker-K.log; watch progress with e.g.
+exits (and after you close the terminal), and opens its OWN ChatGPT tab
+(--new-tab) so workers don't fight over one tab. Output goes to
+logs/worker-K.log; watch progress with e.g.
 `Get-Content logs\\worker-1.log -Wait` (PowerShell) or `tail -f logs/worker-1.log`.
 
-Two layouts (mix as you like):
+Workers share a dynamic queue (--queue): each atomically claims the next
+unsolved problem, so a fast account automatically solves more than a slow
+or rate-limited one, and a problem that failed on one account is retried
+by another. Two layouts (mix as you like):
 
   One browser, several tabs (one login does all the work):
       python run_parallel.py --workers 3
-  Several logged-in browsers, each on its own debug port
-  (spread across accounts to avoid per-account rate limits):
+  BEST FOR SPEED — several browsers, each logged in to a DIFFERENT
+  ChatGPT account, each on its own debug port:
       python run_parallel.py --ports 9222 9223 9224
 
 Every browser must have been started with --remote-debugging-port (and its
@@ -32,6 +34,10 @@ HERE = Path(__file__).parent
 WORKER = HERE / "homework_automation_cdp.py"
 LOGS = HERE / "logs"
 PIDFILE = LOGS / "workers.json"
+_solutions = Path(os.environ.get("HOMEWORK_SOLUTIONS_DIR", HERE / "solutions"))
+if not _solutions.is_absolute():
+    _solutions = HERE / _solutions  # workers run with cwd=HERE; match them
+CLAIMS_DIR = _solutions / ".claims"
 
 
 def pid_alive(pid: int) -> bool:
@@ -120,6 +126,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="CDP host")
     parser.add_argument("--timeout", type=float, default=180.0,
                         help="Per-answer timeout passed to workers")
+    parser.add_argument("--max-retries", type=int, default=3,
+                        help="Give up on a problem after this many failed "
+                        "attempts across all workers (default: 3)")
     args = parser.parse_args()
 
     if args.workers is not None and args.workers < 1:
@@ -142,23 +151,35 @@ def main() -> None:
             "(kill <pid> / Stop-Process -Id <pid>)."
         )
 
+    # Fresh queue state: claims/attempt counters left over from a finished
+    # or killed run must not block this one (we know no worker is alive).
+    if CLAIMS_DIR.is_dir():
+        for f in CLAIMS_DIR.glob("*"):
+            f.unlink(missing_ok=True)
+
     procs = []
     for port, k in endpoints:
         cmd = [
             sys.executable, "-u", str(WORKER),
             "--host", args.host, "--port", str(port),
-            "--shard", f"{k}/{total}",
-            "--new-tab", "--skip-existing",
+            "--queue", "--new-tab",
             "--timeout", str(args.timeout),
+            "--max-retries", str(args.max_retries),
         ]
         log_path = LOGS / f"worker-{k}.log"
         proc = spawn_detached(cmd, log_path)
         procs.append((k, port, proc, log_path))
+        # record every spawned pid immediately, so an interrupted launch
+        # still leaves a pidfile and the next launch refuses to run (and
+        # wipe claims) while these workers are alive
+        PIDFILE.write_text(json.dumps([p.pid for _, _, p, _ in procs]))
         print(f"worker {k}/{total}: port {port}, pid {proc.pid}, log {log_path}")
         time.sleep(2)  # stagger startup so tabs don't open at the same instant
 
-    # A worker that dies at startup (bad port, browser not logged in) would
-    # silently drop its whole shard — catch that instead of claiming success.
+    # Catch workers that die immediately (bad port, unreachable browser)
+    # instead of claiming success; slower failures (e.g. a browser that is
+    # not logged in fails after a ~60s wait) only show up in the worker log,
+    # but the queue redistributes their problems either way.
     time.sleep(3)
     dead = [(k, port, p, lp) for k, port, p, lp in procs if p.poll() is not None]
     running = [(k, port, p, lp) for k, port, p, lp in procs if p.poll() is None]
@@ -166,7 +187,8 @@ def main() -> None:
 
     for k, port, p, lp in dead:
         print(f"\nWORKER {k} DIED at startup (port {port}, exit {p.returncode}); "
-              f"its problems will NOT be solved. Last log lines ({lp}):")
+              f"the queue hands its work to the other workers. "
+              f"Last log lines ({lp}):")
         print(log_tail(lp))
 
     if not running:
@@ -180,8 +202,9 @@ def main() -> None:
         "(PowerShell: Stop-Process -Id <pid>)"
     )
     if dead:
-        print(f"Re-run this launcher after fixing the {len(dead)} dead "
-              "worker(s) above — --skip-existing resumes where they left off.")
+        print(f"Note: the {len(dead)} dead worker(s) above are not fatal — "
+              "the queue redistributes their problems to the running "
+              "workers. Fix and re-run later for more parallelism.")
         sys.exit(1)
 
 
