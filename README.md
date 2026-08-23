@@ -19,6 +19,9 @@ For each problem file the script:
 pip install -r requirements.txt
 ```
 
+- **Windows** works out of the box (`pygetwindow` is installed automatically
+  there). If the ChatGPT window won't come to the front, click it once manually
+  the first time — Windows restricts focus-stealing by background processes.
 - **Linux** additionally needs `xdotool` (`sudo apt install xdotool`) and an X11 session.
 - **macOS** will prompt for Accessibility permissions the first time
   (System Settings → Privacy & Security → Accessibility).

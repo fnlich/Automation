@@ -48,10 +48,22 @@ def activate_chatgpt_window(title: str = WINDOW_TITLE) -> bool:
         if not windows:
             return False
         win = windows[0]
-        if win.isMinimized:
-            win.restore()
-        win.activate()
-        return True
+        try:
+            if win.isMinimized:
+                win.restore()
+            win.activate()
+        except gw.PyGetWindowException:
+            # Windows often refuses SetForegroundWindow for background
+            # processes; a quick minimize/restore cycle reliably raises it.
+            try:
+                win.minimize()
+                win.restore()
+            except gw.PyGetWindowException:
+                return False
+        # Give the window manager a moment, then verify focus took.
+        time.sleep(0.3)
+        active = gw.getActiveWindow()
+        return active is not None and title.lower() in active.title.lower()
 
     if system == "Darwin":
         script = f'''
