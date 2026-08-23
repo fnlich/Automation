@@ -22,6 +22,7 @@ then open https://chatgpt.com and log in. Run:
 """
 
 import argparse
+import ast
 import sys
 import time
 from pathlib import Path
@@ -54,9 +55,45 @@ def find_chatgpt_page(browser):
     return None
 
 
+def new_chat(page) -> None:
+    """Open a fresh conversation so each problem starts with empty context.
+
+    Keeps responses fast and the DOM small — in one long conversation
+    ChatGPT re-renders/virtualizes the message list, which broke the old
+    count-based answer detection from around the 4th problem on.
+    """
+    page.goto("https://chatgpt.com/", wait_until="domcontentloaded")
+    page.wait_for_selector(COMPOSER, timeout=30_000)
+
+
+def _last_message_id(page) -> str | None:
+    messages = page.locator(ASSISTANT_MSG)
+    n = messages.count()
+    if n == 0:
+        return None
+    return messages.nth(n - 1).get_attribute("data-message-id")
+
+
+def _read_reply(reply) -> str | None:
+    code_blocks = reply.locator("pre code")
+    if code_blocks.count() > 0:
+        return code_blocks.nth(code_blocks.count() - 1).inner_text()
+    # no code block — fall back to the whole reply text
+    text = reply.inner_text().strip()
+    return text or None
+
+
 def ask(page, prompt: str, timeout: float, poll: float) -> str | None:
-    """Send one prompt and return the code from the new assistant reply."""
-    before = page.locator(ASSISTANT_MSG).count()
+    """Send one prompt and return the code from the new assistant reply.
+
+    The new reply is identified by its data-message-id being different
+    from the last assistant message before sending — NOT by message
+    count, which is unreliable once ChatGPT virtualizes long threads.
+    A reply only counts as finished when the Stop button is gone AND its
+    text is unchanged across two consecutive polls, so long "thinking"
+    phases and Stop-button flicker between phases can't truncate it.
+    """
+    id_before = _last_message_id(page)
 
     composer = page.locator(COMPOSER)
     composer.click()
@@ -65,23 +102,28 @@ def ask(page, prompt: str, timeout: float, poll: float) -> str | None:
     page.locator(SEND_BUTTON).click()
 
     deadline = time.time() + timeout
+    stable = None
     while time.time() < deadline:
         time.sleep(poll)
-        # still streaming while the Stop button is visible
+        # still generating/thinking while the Stop button is visible
         if page.locator(STOP_BUTTON).count() > 0:
+            stable = None
             continue
         messages = page.locator(ASSISTANT_MSG)
-        if messages.count() <= before:
+        n = messages.count()
+        if n == 0:
             continue
-        reply = messages.nth(messages.count() - 1)
-        code_blocks = reply.locator("pre code")
-        if code_blocks.count() > 0:
-            return code_blocks.nth(code_blocks.count() - 1).inner_text()
-        # no code block — fall back to the whole reply text
-        text = reply.inner_text().strip()
-        if text:
-            return text
-    return None
+        reply = messages.nth(n - 1)
+        reply_id = reply.get_attribute("data-message-id")
+        if reply_id is not None and reply_id == id_before:
+            continue  # still the previous answer; ours hasn't rendered yet
+        text = _read_reply(reply)
+        if text is None:
+            continue
+        if text == stable:
+            return text  # finished: no Stop button and unchanged text
+        stable = text
+    return stable
 
 
 def main() -> None:
@@ -93,6 +135,12 @@ def main() -> None:
         default="127.0.0.1",
         help="CDP host (default: 127.0.0.1 — not 'localhost', which can "
         "resolve to IPv6 ::1 while Chrome listens on IPv4 only)",
+    )
+    parser.add_argument(
+        "--same-chat",
+        action="store_true",
+        help="Keep all problems in one conversation instead of starting "
+        "a fresh chat per problem (slower and less reliable)",
     )
     parser.add_argument("--timeout", type=float, default=180.0,
                         help="Max seconds to wait per answer (default: 180)")
@@ -134,6 +182,10 @@ def main() -> None:
             name = path.stem
             print(f"[{i}/{len(problems)}] {path.name}")
 
+            if not args.same_chat:
+                new_chat(page)
+                print("  started a new chat")
+
             prompt = PROMPT_TEMPLATE.format(problem=path.read_text(encoding="utf-8"))
             solution = ask(page, prompt, args.timeout, args.poll)
             if solution is None:
@@ -142,7 +194,12 @@ def main() -> None:
 
             out = SOLUTIONS_DIR / f"{name}.py"
             out.write_text(solution.rstrip("\n") + "\n", encoding="utf-8")
-            print(f"  saved {out}")
+            try:
+                ast.parse(solution)
+                print(f"  saved {out} (valid Python)")
+            except SyntaxError as e:
+                print(f"  saved {out} — WARNING: not valid Python ({e.msg}, "
+                      f"line {e.lineno}); check it manually")
 
     print("Done.")
 
