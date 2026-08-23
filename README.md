@@ -64,6 +64,11 @@ By default the answer is read via ChatGPT's built-in **Ctrl+Shift+;**
 (copy last code block) shortcut; `--capture page` falls back to a
 select-all copy of the whole page.
 
+Keep your hands off the mouse/keyboard while this GUI script runs — it
+drives your real desktop. Move the mouse to a screen corner to trigger
+PyAutoGUI's failsafe abort if something goes wrong. (The CDP scripts below
+don't have this restriction.)
+
 ## Alternative: DOM automation via CDP (recommended)
 
 `homework_automation_cdp.py` does the same job without touching the keyboard,
@@ -87,6 +92,61 @@ far more reliable and lets you keep using your computer while it runs.
 It detects the end of the answer by watching ChatGPT's Stop button disappear,
 then reads the reply's code block straight from the page.
 
-Keep your hands off the mouse/keyboard while it runs — it drives your real
-desktop. Move the mouse to a screen corner to trigger PyAutoGUI's failsafe
-abort if something goes wrong.
+## Running several workers simultaneously (background)
+
+Only the CDP script can parallelize — the GUI script drives the one real
+keyboard/mouse, so two copies would fight over it. `run_parallel.py` starts
+N detached background workers (they keep running after the terminal
+closes); each worker opens its own ChatGPT tab and they share a **dynamic
+work queue**: every worker atomically claims the next unsolved problem, so
+fast accounts automatically solve more, slow or rate-limited ones less, and
+nothing ever waits on a fixed pre-assigned split.
+
+**Fastest layout: one browser per ChatGPT account.** Each account has its
+own rate limit, so N accounts give a true N-fold budget; a problem that
+failed on one account (rate limit, bad reply) is automatically retried by
+another account, up to 3 attempts (`--max-retries`).
+
+```bash
+# BEST FOR SPEED: 3 browsers, each logged in to a DIFFERENT account
+python run_parallel.py --ports 9222 9223 9224
+
+# or 3 workers as 3 tabs in ONE logged-in browser (shared rate limit)
+python run_parallel.py --workers 3
+```
+
+For the multi-browser layout, start each browser with its own port AND its
+own profile dir, and log in to ChatGPT in each:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-debug-1
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9223 --user-data-dir=C:\chrome-debug-2
+```
+
+Progress: `tail -f logs/worker-1.log` (PowerShell:
+`Get-Content logs\worker-1.log -Wait`). Stop a worker: `kill <pid>`
+(PowerShell: `Stop-Process -Id <pid>`); the PIDs are printed at launch.
+
+Details worth knowing:
+
+- With no flags, `run_parallel.py` starts 2 workers on port 9222.
+- The queue claims problems atomically through `solutions/.claims/`, so two
+  workers can never solve the same problem; if a worker dies mid-problem,
+  its claim expires and — as long as at least one worker is still running —
+  another worker takes the problem over. A worker whose browser disappears
+  mid-run exits without touching the retry budget; its problem goes back to
+  the queue. (If ALL workers die, just re-run the launcher.)
+- A reply that isn't valid Python is kept as `solutions/hwNN.failed.txt`
+  instead of `hwNN.py`; only files that parse count as solved. A problem
+  gets up to `--max-retries` attempts in total (default 3, settable on the
+  launcher too) spread across whichever workers pick it up; re-running the
+  launcher resets those counters, so given-up problems are tried again.
+- The launcher tells you about workers that die within seconds of starting
+  (bad port, unreachable browser); slower startup failures — typically a
+  browser that isn't logged in, which gives up after ~60s — show up in that
+  worker's log instead. Either way the queue hands their work to the
+  surviving workers. The launcher refuses to start while a previous run's
+  workers are still alive, so two runs can't race on the same files.
+- Several tabs in one browser share one ChatGPT account, and free accounts
+  rate-limit concurrent messages — that's why one browser per account is
+  the fastest layout.
