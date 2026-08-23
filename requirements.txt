@@ -1,0 +1,3 @@
+pyperclip
+pyautogui
+pygetwindow; sys_platform == "win32"
