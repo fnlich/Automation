@@ -48,17 +48,59 @@ def copy_to_clipboard(text: str) -> None:
     pyperclip.copy(text)
 
 
-def activate_chatgpt_window(title: str = WINDOW_TITLE) -> bool:
-    """Bring the browser window containing ChatGPT to the foreground."""
+# The ChatGPT tab is only titled "ChatGPT" until the first message is sent —
+# after that the tab (and window) title becomes the conversation's name. So we
+# locate the window by title ONCE and remember a title-independent handle
+# (hwnd / X11 window id / process name) to reactivate it afterwards.
+_window_handle = None
+
+
+def _find_by_title(title: str):
+    """Locate the ChatGPT window by title and return a reusable handle."""
     system = platform.system()
 
     if system == "Windows":
         import pygetwindow as gw
 
-        windows = [w for w in gw.getAllWindows() if title.lower() in w.title.lower()]
-        if not windows:
-            return False
-        win = windows[0]
+        for w in gw.getAllWindows():
+            if title.lower() in w.title.lower():
+                return w  # bound to the hwnd, valid after the title changes
+        return None
+
+    if system == "Darwin":
+        script = f'''
+        tell application "System Events"
+            repeat with proc in (every process whose background only is false)
+                repeat with win in (every window of proc)
+                    if name of win contains "{title}" then
+                        return name of proc
+                    end if
+                end repeat
+            end repeat
+        end tell
+        return ""
+        '''
+        result = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True
+        )
+        name = result.stdout.strip()
+        return name or None  # process (app) name survives title changes
+
+    # Linux: X11 window id survives title changes
+    result = subprocess.run(
+        ["xdotool", "search", "--name", title], capture_output=True, text=True
+    )
+    ids = result.stdout.split()
+    return ids[0] if ids else None
+
+
+def _activate_handle(handle) -> bool:
+    system = platform.system()
+
+    if system == "Windows":
+        import pygetwindow as gw
+
+        win = handle
         try:
             if win.isMinimized:
                 win.restore()
@@ -71,37 +113,37 @@ def activate_chatgpt_window(title: str = WINDOW_TITLE) -> bool:
                 win.restore()
             except gw.PyGetWindowException:
                 return False
-        # Give the window manager a moment, then verify focus took.
+        # Give the window manager a moment, then verify focus took (compare
+        # by hwnd, not title — the title changes once the chat is named).
         time.sleep(0.3)
         active = gw.getActiveWindow()
-        return active is not None and title.lower() in active.title.lower()
+        return active is not None and active._hWnd == win._hWnd
 
     if system == "Darwin":
-        script = f'''
-        tell application "System Events"
-            repeat with proc in (every process whose background only is false)
-                repeat with win in (every window of proc)
-                    if name of win contains "{title}" then
-                        set frontmost of proc to true
-                        perform action "AXRaise" of win
-                        return "found"
-                    end if
-                end repeat
-            end repeat
-        end tell
-        return "not found"
-        '''
+        script = f'tell application "System Events" to set frontmost of process "{handle}" to true'
         result = subprocess.run(
             ["osascript", "-e", script], capture_output=True, text=True
         )
-        return "found" in result.stdout
+        return result.returncode == 0
 
-    # Linux: use xdotool
     result = subprocess.run(
-        ["xdotool", "search", "--name", title, "windowactivate", "--sync"],
-        capture_output=True,
+        ["xdotool", "windowactivate", "--sync", str(handle)], capture_output=True
     )
     return result.returncode == 0
+
+
+def activate_chatgpt_window(title: str = WINDOW_TITLE) -> bool:
+    """Bring the ChatGPT browser window to the foreground.
+
+    The first call finds it by title; later calls reuse the remembered
+    handle, because after the first request the tab title changes from
+    "ChatGPT" to the conversation's name.
+    """
+    global _window_handle
+    if _window_handle is not None and _activate_handle(_window_handle):
+        return True
+    _window_handle = _find_by_title(title)
+    return _window_handle is not None and _activate_handle(_window_handle)
 
 
 def paste_and_send(send: bool) -> None:
@@ -150,13 +192,24 @@ def extract_solution(page: str, name: str) -> str | None:
     return body if body.strip() else None
 
 
-def wait_for_solution(name: str, timeout: float, poll: float) -> str | None:
-    """Poll the page until ChatGPT's answer (with the END marker) appears."""
+def copy_last_code_block() -> str:
+    """Use ChatGPT's built-in shortcut (Ctrl/Cmd+Shift+;) to copy the last
+    code block of the conversation — no select-all needed."""
+    mod = "command" if platform.system() == "Darwin" else "ctrl"
+    pyperclip.copy("")
+    pyautogui.hotkey(mod, "shift", ";")
+    time.sleep(0.3)
+    return pyperclip.paste()
+
+
+def wait_for_solution(name: str, timeout: float, poll: float, capture: str) -> str | None:
+    """Poll until ChatGPT's answer (with the END marker) appears and is stable."""
+    grab = copy_last_code_block if capture == "shortcut" else copy_page_text
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         time.sleep(poll)
-        solution = extract_solution(copy_page_text(), name)
+        solution = extract_solution(grab(), name)
         if solution is not None:
             if solution == last:  # unchanged across two polls => finished
                 return solution
@@ -187,6 +240,14 @@ def main() -> None:
         type=float,
         default=180.0,
         help="Max seconds to wait for ChatGPT's answer per problem (default: 180)",
+    )
+    parser.add_argument(
+        "--capture",
+        choices=["shortcut", "page"],
+        default="shortcut",
+        help="How to read the answer: 'shortcut' uses ChatGPT's "
+        "Ctrl+Shift+; copy-last-code-block hotkey (default); "
+        "'page' does a select-all copy of the whole page",
     )
     parser.add_argument(
         "--poll",
@@ -235,7 +296,7 @@ def main() -> None:
             continue
 
         print("  waiting for ChatGPT's answer...")
-        solution = wait_for_solution(name, args.timeout, args.poll)
+        solution = wait_for_solution(name, args.timeout, args.poll, args.capture)
         if solution is None:
             print(f"  WARNING: no answer captured within {args.timeout:.0f}s, skipping")
             continue
