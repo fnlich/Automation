@@ -150,13 +150,24 @@ def extract_solution(page: str, name: str) -> str | None:
     return body if body.strip() else None
 
 
-def wait_for_solution(name: str, timeout: float, poll: float) -> str | None:
-    """Poll the page until ChatGPT's answer (with the END marker) appears."""
+def copy_last_code_block() -> str:
+    """Use ChatGPT's built-in shortcut (Ctrl/Cmd+Shift+;) to copy the last
+    code block of the conversation — no select-all needed."""
+    mod = "command" if platform.system() == "Darwin" else "ctrl"
+    pyperclip.copy("")
+    pyautogui.hotkey(mod, "shift", ";")
+    time.sleep(0.3)
+    return pyperclip.paste()
+
+
+def wait_for_solution(name: str, timeout: float, poll: float, capture: str) -> str | None:
+    """Poll until ChatGPT's answer (with the END marker) appears and is stable."""
+    grab = copy_last_code_block if capture == "shortcut" else copy_page_text
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         time.sleep(poll)
-        solution = extract_solution(copy_page_text(), name)
+        solution = extract_solution(grab(), name)
         if solution is not None:
             if solution == last:  # unchanged across two polls => finished
                 return solution
@@ -187,6 +198,14 @@ def main() -> None:
         type=float,
         default=180.0,
         help="Max seconds to wait for ChatGPT's answer per problem (default: 180)",
+    )
+    parser.add_argument(
+        "--capture",
+        choices=["shortcut", "page"],
+        default="shortcut",
+        help="How to read the answer: 'shortcut' uses ChatGPT's "
+        "Ctrl+Shift+; copy-last-code-block hotkey (default); "
+        "'page' does a select-all copy of the whole page",
     )
     parser.add_argument(
         "--poll",
@@ -235,7 +254,7 @@ def main() -> None:
             continue
 
         print("  waiting for ChatGPT's answer...")
-        solution = wait_for_solution(name, args.timeout, args.poll)
+        solution = wait_for_solution(name, args.timeout, args.poll, args.capture)
         if solution is None:
             print(f"  WARNING: no answer captured within {args.timeout:.0f}s, skipping")
             continue

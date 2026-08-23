@@ -57,6 +57,28 @@ Options:
 
 Answers land in `solutions/`, named after the problem (`hw07.md` → `hw07.py`).
 
+By default the answer is read via ChatGPT's built-in **Ctrl+Shift+;**
+(copy last code block) shortcut; `--capture page` falls back to a
+select-all copy of the whole page.
+
+## Alternative: DOM automation via CDP (recommended)
+
+`homework_automation_cdp.py` does the same job without touching the keyboard,
+mouse, or clipboard: it attaches Playwright to your already-open browser
+through the Chrome DevTools Protocol and reads ChatGPT's DOM directly. It is
+far more reliable and lets you keep using your computer while it runs.
+
+1. Start your browser with debugging enabled (close all Chrome windows first):
+   - Windows: `chrome.exe --remote-debugging-port=9222`
+   - macOS: `open -a "Google Chrome" --args --remote-debugging-port=9222`
+   - Linux: `google-chrome --remote-debugging-port=9222`
+2. Open https://chatgpt.com and log in.
+3. `pip install playwright` (no browser download needed — it attaches to yours).
+4. `python homework_automation_cdp.py` (same `--problem` / `--timeout` flags).
+
+It detects the end of the answer by watching ChatGPT's Stop button disappear,
+then reads the reply's code block straight from the page.
+
 Keep your hands off the mouse/keyboard while it runs — it drives your real
 desktop. Move the mouse to a screen corner to trigger PyAutoGUI's failsafe
 abort if something goes wrong.
