@@ -71,8 +71,13 @@ mouse, or clipboard: it attaches Playwright to your already-open browser
 through the Chrome DevTools Protocol and reads ChatGPT's DOM directly. It is
 far more reliable and lets you keep using your computer while it runs.
 
-1. Start your browser with debugging enabled (close all Chrome windows first):
-   - Windows: `chrome.exe --remote-debugging-port=9222`
+1. Start your browser with debugging enabled (close all Chrome windows first —
+   including tray/background processes, or the flag is silently ignored):
+   - Windows (PowerShell):
+     `& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-debug`
+     (recent Chrome requires a separate `--user-data-dir` for the debug port
+     to open; log in to ChatGPT once in that profile. Verify it works by
+     opening http://127.0.0.1:9222/json/version — you should see JSON.)
    - macOS: `open -a "Google Chrome" --args --remote-debugging-port=9222`
    - Linux: `google-chrome --remote-debugging-port=9222`
 2. Open https://chatgpt.com and log in.
